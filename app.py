@@ -302,60 +302,39 @@ merged["増減数"] = merged[newest_col] - merged[oldest_col]
 merged = merged.sort_values("商品名").reset_index(drop=True)
 
 # ──────────────────────────────────────────────
-# フィルタリング — 個数一致方式
+# フィルタリング — 増減数スライダー
 # ──────────────────────────────────────────────
-st.subheader("🔍 フィルタリング")
+st.subheader("🔍 増減数フィルタ")
 
-# 最新ファイルに存在する個数のユニーク値一覧を取得（ボタン選択用）
-unique_qtys = sorted(merged[newest_col].unique())
+diff_min = int(merged["増減数"].min())
+diff_max = int(merged["増減数"].max())
 
-col_left, col_right = st.columns([2, 1])
-
-with col_left:
-    filter_value = st.number_input(
-        "🔢 最新ファイルの個数が **この値と一致** する商品を表示",
-        value=int(unique_qtys[0]) if unique_qtys else 0,
+if diff_min == diff_max:
+    # 全商品の増減が同じ場合はスライダー不要
+    st.info(f"すべての商品の増減数が **{diff_min}** です。")
+    selected_diff = diff_min
+    filtered = merged.copy()
+else:
+    selected_diff = st.slider(
+        "増減数を指定してください",
+        min_value=diff_min,
+        max_value=diff_max,
+        value=diff_min,
         step=1,
-        help="ここに入力した個数と、最新ファイルの在庫数が一致する商品のみ表示されます",
+        help="スライダーを動かすと、その増減数に一致する商品だけが表示されます",
     )
 
-with col_right:
-    enable_filter = st.checkbox("個数フィルタを有効にする", value=False)
+    # リアルタイムで該当件数を表示
+    match_count = int((merged["増減数"] == selected_diff).sum())
+    total_count = len(merged)
 
-# 増減方向フィルタ
-diff_filter = st.radio(
-    "増減の絞り込み",
-    ["すべて", "増加のみ (+)", "減少のみ (-)", "変化なし (0)"],
-    index=0,
-    horizontal=True,
-)
+    st.markdown(
+        f"📌 増減数 **{selected_diff:+d}** に該当する商品: "
+        f"**{match_count}** 件 / 全 {total_count} 件"
+    )
 
-# クイック選択ボタン（よく使う個数をワンタッチ選択）
-st.caption("📌 クイック選択（最新ファイル内に存在する個数値）")
-quick_cols = st.columns(min(len(unique_qtys), 10))
-selected_quick: int | None = None
-for qi, q in enumerate(unique_qtys[:10]):
-    with quick_cols[qi % len(quick_cols)]:
-        if st.button(str(int(q)), key=f"quick_{qi}", use_container_width=True):
-            selected_quick = int(q)
-
-# クイック選択が押されたら反映
-if selected_quick is not None:
-    filter_value = selected_quick
-    enable_filter = True
-
-# フィルタ適用
-filtered = merged.copy()
-
-if enable_filter:
-    filtered = filtered[filtered[newest_col] == filter_value]
-
-if diff_filter == "増加のみ (+)":
-    filtered = filtered[filtered["増減数"] > 0]
-elif diff_filter == "減少のみ (-)":
-    filtered = filtered[filtered["増減数"] < 0]
-elif diff_filter == "変化なし (0)":
-    filtered = filtered[filtered["増減数"] == 0]
+    # フィルタ適用
+    filtered = merged[merged["増減数"] == selected_diff].copy()
 
 # ──────────────────────────────────────────────
 # テーブル表示
