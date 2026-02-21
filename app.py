@@ -18,12 +18,7 @@ st.set_page_config(
 # パスワードのハッシュ値を .streamlit/secrets.toml (ローカル)
 # または Streamlit Cloud の Secrets 設定に記載してください。
 #
-# [passwords]
-# admin = "SHA-256ハッシュ値"
-# "400476" = "SHA-256ハッシュ値"
-#
-# ハッシュ値の生成方法:
-#   python -c "import hashlib; print(hashlib.sha256('パスワード'.encode()).hexdigest())"
+
 _USERS: dict[str, str] = {}
 if "passwords" in st.secrets:
     for uid, hashed_pw in st.secrets["passwords"].items():
