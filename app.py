@@ -13,18 +13,21 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────
-# 認証設定（ID・パスワード）
+# 認証設定（Streamlit Secrets から読み込み）
 # ──────────────────────────────────────────────
-# パスワードは SHA-256 ハッシュで保存。
-# 新しいユーザーを追加するには、下記の辞書にエントリを追加してください。
-# ハッシュ値は Python で以下のように生成できます:
-#   import hashlib
-#   hashlib.sha256("あなたのパスワード".encode()).hexdigest()
-_USERS = {
-    "admin": hashlib.sha256("admin123".encode()).hexdigest(),
-    "400476": hashlib.sha256("230915".encode()).hexdigest(),
-    # "user2": hashlib.sha256("password2".encode()).hexdigest(),
-}
+# パスワードのハッシュ値を .streamlit/secrets.toml (ローカル)
+# または Streamlit Cloud の Secrets 設定に記載してください。
+#
+# [passwords]
+# admin = "SHA-256ハッシュ値"
+# "400476" = "SHA-256ハッシュ値"
+#
+# ハッシュ値の生成方法:
+#   python -c "import hashlib; print(hashlib.sha256('パスワード'.encode()).hexdigest())"
+_USERS: dict[str, str] = {}
+if "passwords" in st.secrets:
+    for uid, hashed_pw in st.secrets["passwords"].items():
+        _USERS[uid] = hashed_pw
 
 
 def _verify(user_id: str, password: str) -> bool:
