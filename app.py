@@ -2,6 +2,13 @@ import streamlit as st
 import pandas as pd
 import hashlib
 from datetime import datetime
+import io
+import os
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.lib import colors
 
 # ──────────────────────────────────────────────
 # ページ設定
@@ -73,6 +80,17 @@ if not st.session_state.authenticated:
 st.markdown(
     """
     <style>
+    /* デフォルトUIの非表示化 */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    /* 画面上部などの余白を狭くする */
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 1.5rem;
+    }
+
     /* ヘッダー */
     .main-header {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -122,6 +140,7 @@ st.markdown(
 # ──────────────────────────────────────────────
 # 列名の自動検出ヘルパー
 # ──────────────────────────────────────────────
+_JAN_CANDIDATES = ["JANコード", "JAN", "janコード", "jan_code", "barcode", "バーコード", "商品コード"]
 _PRODUCT_CANDIDATES = ["商品名", "品名", "製品名", "品番", "商品", "アイテム名", "item", "product"]
 _QTY_CANDIDATES = ["個数", "数量", "在庫数", "在庫", "stock", "quantity", "qty"]
 
@@ -133,6 +152,159 @@ def _find_column(columns: pd.Index, candidates: list[str]) -> str | None:
         if cand.lower() in lower_map:
             return lower_map[cand.lower()]
     return None
+
+
+def _find_master_sheet(sheet_names: list[str]) -> str | None:
+    """シート名に 'マスター' を含むシートを自動検出する。"""
+    for name in sheet_names:
+        if "マスター" in name or "マスタ" in name or "master" in name.lower():
+            return name
+    return None
+
+
+def _extract_and_merge(
+    xls: pd.ExcelFile,
+    main_sheet: str,
+    master_sheet: str,
+) -> tuple[pd.DataFrame | None, str | None]:
+    """
+    メインシートとマスターシートからデータを抽出し、
+    JANコードをキーに結合して「商品名」「個数」の対応表を返す。
+
+    戻り値: (DataFrame or None, error_message or None)
+    """
+    # ── メインシート読み込み ──
+    try:
+        df_main = pd.read_excel(xls, sheet_name=main_sheet, engine="openpyxl")
+    except Exception as e:
+        return None, f"メインシート「{main_sheet}」の読み込みに失敗: {e}"
+
+    jan_col_main = _find_column(df_main.columns, _JAN_CANDIDATES)
+    qty_col = _find_column(df_main.columns, _QTY_CANDIDATES)
+
+    if jan_col_main is None:
+        return None, (
+            f"メインシート「{main_sheet}」に JANコード列が見つかりません。\n"
+            f"  検出対象: {', '.join(_JAN_CANDIDATES)}\n"
+            f"  実際の列名: {', '.join(df_main.columns.tolist())}"
+        )
+    if qty_col is None:
+        return None, (
+            f"メインシート「{main_sheet}」に 個数列が見つかりません。\n"
+            f"  検出対象: {', '.join(_QTY_CANDIDATES)}\n"
+            f"  実際の列名: {', '.join(df_main.columns.tolist())}"
+        )
+
+    main_data = df_main[[jan_col_main, qty_col]].copy()
+    main_data.columns = ["JANコード", "個数"]
+    main_data["個数"] = pd.to_numeric(main_data["個数"], errors="coerce").fillna(0).astype(int)
+    main_data = main_data.dropna(subset=["JANコード"])
+
+    # ── マスターシート読み込み ──
+    try:
+        df_master = pd.read_excel(xls, sheet_name=master_sheet, engine="openpyxl")
+    except Exception as e:
+        return None, f"マスターシート「{master_sheet}」の読み込みに失敗: {e}"
+
+    jan_col_master = _find_column(df_master.columns, _JAN_CANDIDATES)
+    product_col = _find_column(df_master.columns, _PRODUCT_CANDIDATES)
+
+    if jan_col_master is None:
+        return None, (
+            f"マスターシート「{master_sheet}」に JANコード列が見つかりません。\n"
+            f"  検出対象: {', '.join(_JAN_CANDIDATES)}\n"
+            f"  実際の列名: {', '.join(df_master.columns.tolist())}"
+        )
+    if product_col is None:
+        return None, (
+            f"マスターシート「{master_sheet}」に 商品名列が見つかりません。\n"
+            f"  検出対象: {', '.join(_PRODUCT_CANDIDATES)}\n"
+            f"  実際の列名: {', '.join(df_master.columns.tolist())}"
+        )
+
+    master_data = df_master[[jan_col_master, product_col]].copy()
+    master_data.columns = ["JANコード", "商品名"]
+    master_data = master_data.dropna(subset=["JANコード", "商品名"])
+    # マスターの重複を除去（最初の出現を採用）
+    master_data = master_data.drop_duplicates(subset=["JANコード"], keep="first")
+
+    # ── JAN コードをキーに結合 ──
+    # VLOOKUP等の数式は無視し、マスターの実データで結合
+    merged = pd.merge(main_data, master_data, on="JANコード", how="left")
+
+    # マスターに存在しない JAN コードは商品名を「（不明）」で埋める
+    merged["商品名"] = merged["商品名"].fillna("（不明：マスター未登録）")
+
+    # 商品名ごとに個数を合算
+    result = merged.groupby("商品名", as_index=False)["個数"].sum()
+
+    return result, None
+
+def _create_pdf(df: pd.DataFrame) -> bytes:
+    """データフレームからPDFを生成しバイト列で返す"""
+    font_path = "ipaexg.ttf"
+    font_name = "IPAexGothic"
+    
+    # 1. 日本語フォント(IPAexGothic)の登録
+    if os.path.exists(font_path):
+        pdfmetrics.registerFont(TTFont(font_name, font_path))
+    else:
+        # フォントファイルがない場合のフォールバック（文字化けする可能性あり）
+        font_name = "Helvetica"
+
+    buffer = io.BytesIO()
+    
+    # A4横向きで余白を設定
+    doc = SimpleDocTemplate(
+        buffer, 
+        pagesize=landscape(A4),
+        rightMargin=30, 
+        leftMargin=30, 
+        topMargin=30, 
+        bottomMargin=30
+    )
+
+    # データを2次元リストに変換 (列名 + データ行)
+    data = [df.columns.tolist()] + df.values.tolist()
+
+    # 表の列幅を計算 (A4横幅842 - 左右余白60 = 782 を配分)
+    # 商品名(1列目)を広く、残りを均等にする
+    usable_width = 782
+    num_cols = len(df.columns)
+    
+    if num_cols > 1:
+        first_col_w = 200
+        other_col_w = (usable_width - first_col_w) / (num_cols - 1)
+        col_widths = [first_col_w] + [other_col_w] * (num_cols - 1)
+    else:
+        col_widths = [usable_width]
+
+    table = Table(data, colWidths=col_widths)
+
+    # テーブルのスタイル設定
+    style = TableStyle([
+        ('FONTNAME', (0, 0), (-1, -1), font_name),      # 全体に日本語フォントを適用
+        ('FONTSIZE', (0, 0), (-1, -1), 10),             # フォントサイズ
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#667eea")), # ヘッダーの背景色
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke), # ヘッダーの文字色
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),          # 基本は中央揃え
+        ('ALIGN', (0, 1), (0, -1), 'LEFT'),             # 商品名のみ左揃え
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),         # 垂直中央
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),          # ヘッダーの下部余白
+        ('TOPPADDING', (0, 0), (-1, 0), 8),             # ヘッダーの上部余白
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),    # 全体に1ptの黒い罫線
+    ])
+    
+    # データ行に対し、1行おきに背景色をつけて見やすくする
+    for i in range(1, len(data)):
+        if i % 2 == 0:
+            style.add('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f8fafc"))
+
+    table.setStyle(style)
+    
+    # PDF構築
+    doc.build([table])
+    return buffer.getvalue()
 
 
 # ──────────────────────────────────────────────
@@ -167,6 +339,8 @@ def _remove_slot(slot_id: int):
 with st.sidebar:
     st.header("📂 ファイルアップロード")
     st.caption("上から順に **古い → 新しい** の順でアップロードしてください。")
+    st.caption("💡 各ファイルは「メインシート（JANコード＋個数）」と"
+               "「マスターシート（JANコード＋商品名）」を含む Excel ブックを想定しています。")
 
     slot_ids = st.session_state.slot_ids
     total_slots = len(slot_ids)
@@ -194,8 +368,42 @@ with st.sidebar:
 
         if file is not None:
             try:
-                df = pd.read_excel(file, engine="openpyxl")
-                uploaded_files.append((file.name, df, None))
+                xls = pd.ExcelFile(file, engine="openpyxl")
+                sheet_names = xls.sheet_names
+
+                # ── メインシート選択（デフォルト: 1 番目のシート）──
+                main_sheet_default = 0
+                main_sheet = st.selectbox(
+                    f"📋 メインシート（{pos + 1} 番目）",
+                    options=sheet_names,
+                    index=main_sheet_default,
+                    key=f"main_sheet_{sid}",
+                    help="JANコードと個数が記載されたシートを選択してください",
+                )
+
+                # ── マスターシート選択（自動検出 or ユーザー指定）──
+                auto_master = _find_master_sheet(sheet_names)
+                if auto_master:
+                    master_default_idx = sheet_names.index(auto_master)
+                else:
+                    # メインシートでない最初のシートを候補にする
+                    master_default_idx = 1 if len(sheet_names) > 1 else 0
+
+                master_sheet = st.selectbox(
+                    f"📑 マスターシート（{pos + 1} 番目）",
+                    options=sheet_names,
+                    index=master_default_idx,
+                    key=f"master_sheet_{sid}",
+                    help="JANコードと商品名が記載されたマスターデータのシートを選択してください",
+                )
+
+                # ── データ抽出＆結合 ──
+                extracted, err = _extract_and_merge(xls, main_sheet, master_sheet)
+                if err:
+                    uploaded_files.append((file.name, None, err))
+                else:
+                    uploaded_files.append((file.name, extracted, None))
+
             except Exception as e:
                 uploaded_files.append((file.name, None, str(e)))
         else:
@@ -228,36 +436,11 @@ for idx, (name, df, err) in enumerate(uploaded_files):
     if name is None:
         continue
     if err is not None:
-        st.warning(f"⚠️ {idx + 1} 番目のファイル（{name}）の読み込みに失敗しました: {err}")
+        st.warning(f"⚠️ {idx + 1} 番目のファイル（{name}）の読み込みに失敗しました:\n{err}")
         continue
 
-    # 列の検出
-    product_col = _find_column(df.columns, _PRODUCT_CANDIDATES)
-    qty_col = _find_column(df.columns, _QTY_CANDIDATES)
-
-    if product_col is None:
-        st.warning(
-            f"⚠️ {idx + 1} 番目のファイル（{name}）に「商品名」に該当する列が見つかりません。"
-            f"\n  検出対象: {', '.join(_PRODUCT_CANDIDATES)}"
-            f"\n  実際の列名: {', '.join(df.columns.tolist())}"
-        )
-        continue
-
-    if qty_col is None:
-        st.warning(
-            f"⚠️ {idx + 1} 番目のファイル（{name}）に「個数」に該当する列が見つかりません。"
-            f"\n  検出対象: {', '.join(_QTY_CANDIDATES)}"
-            f"\n  実際の列名: {', '.join(df.columns.tolist())}"
-        )
-        continue
-
-    extracted = df[[product_col, qty_col]].copy()
-    extracted.columns = ["商品名", "個数"]
-    extracted["個数"] = pd.to_numeric(extracted["個数"], errors="coerce").fillna(0).astype(int)
-    extracted = extracted.dropna(subset=["商品名"])
-    extracted = extracted.groupby("商品名", as_index=False)["個数"].sum()
-
-    valid_frames.append((idx + 1, name, extracted))
+    # df は既に _extract_and_merge で「商品名」「個数」に整形済み
+    valid_frames.append((idx + 1, name, df))
 
 # ──────────────────────────────────────────────
 # データ結合 & 表示
@@ -299,54 +482,6 @@ merged["増減数"] = merged[newest_col] - merged[oldest_col]
 # ソート
 merged = merged.sort_values("商品名").reset_index(drop=True)
 
-# ──────────────────────────────────────────────
-# フィルタリング — 増減数スライダー
-# ──────────────────────────────────────────────
-st.subheader("🔍 増減数フィルタ")
-
-diff_min = int(merged["増減数"].min())
-diff_max = int(merged["増減数"].max())
-
-if diff_min == diff_max:
-    # 全商品の増減が同じ場合はスライダー不要
-    st.info(f"すべての商品の増減数が **{diff_min}** です。")
-    selected_diff = diff_min
-    filtered = merged.copy()
-else:
-    selected_diff = st.slider(
-        "増減数を指定してください",
-        min_value=diff_min,
-        max_value=diff_max,
-        value=diff_min,
-        step=1,
-        help="スライダーを動かすと、その増減数に一致する商品だけが表示されます",
-    )
-
-    # リアルタイムで該当件数を表示
-    match_count = int((merged["増減数"] == selected_diff).sum())
-    total_count = len(merged)
-
-    st.markdown(
-        f"📌 増減数 **{selected_diff:+d}** に該当する商品: "
-        f"**{match_count}** 件 / 全 {total_count} 件"
-    )
-
-    # フィルタ適用
-    filtered = merged[merged["増減数"] == selected_diff].copy()
-
-# ──────────────────────────────────────────────
-# テーブル表示
-# ──────────────────────────────────────────────
-st.subheader("📊 比較結果")
-
-# サマリーカード
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("商品数（フィルタ後）", f"{len(filtered):,}")
-m2.metric("増加した商品", f"{(filtered['増減数'] > 0).sum():,}")
-m3.metric("減少した商品", f"{(filtered['増減数'] < 0).sum():,}")
-m4.metric("変化なし", f"{(filtered['増減数'] == 0).sum():,}")
-
-
 # 色付け関数
 def _style_diff(val):
     if val > 0:
@@ -355,26 +490,91 @@ def _style_diff(val):
         return "color: #e74c3c; font-weight: 700"
     return "color: #95a5a6"
 
+# ──────────────────────────────────────────────
+# メインレイアウト分割
+# ──────────────────────────────────────────────
+left_col, right_col = st.columns([1, 2], gap="large")
 
-if filtered.empty:
-    st.warning("条件に該当するデータがありません。")
-else:
-    styled = filtered.style.map(_style_diff, subset=["増減数"])
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        height=min(len(filtered) * 38 + 50, 600),
+with left_col:
+    # ──────────────────────────────────────────────
+    # フィルタリング — 最新の在庫数フィルタ
+    # ──────────────────────────────────────────────
+    st.subheader("🔍 最新の在庫数フィルタ")
+
+    filter_options = [
+        "フィルタなし",
+        "在庫なし（0個）",
+        "わずか（1〜9個）",
+        "10個台（10〜19個）",
+        "20個台（20〜29個）",
+        "30個台（30〜39個）",
+        "40個以上",
+    ]
+
+    selected_filter = st.selectbox(
+        "表示条件",
+        options=filter_options,
+        index=0, # デフォルトは「フィルタなし」
+        help="選択した条件に最新の在庫数が一致する商品だけが表示されます",
     )
 
-    # CSV ダウンロード
-    csv_data = filtered.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        label="📥 結果を CSV でダウンロード",
-        data=csv_data,
-        file_name="inventory_diff.csv",
-        mime="text/csv",
-        use_container_width=True,
+    # フィルタ適用
+    filtered = merged.copy()
+    latest_stock = filtered[newest_col]
+
+    if selected_filter == "在庫なし（0個）":
+        filtered = filtered[latest_stock == 0]
+    elif selected_filter == "わずか（1〜9個）":
+        filtered = filtered[(latest_stock >= 1) & (latest_stock <= 9)]
+    elif selected_filter == "10個台（10〜19個）":
+        filtered = filtered[(latest_stock >= 10) & (latest_stock <= 19)]
+    elif selected_filter == "20個台（20〜29個）":
+        filtered = filtered[(latest_stock >= 20) & (latest_stock <= 29)]
+    elif selected_filter == "30個台（30〜39個）":
+        filtered = filtered[(latest_stock >= 30) & (latest_stock <= 39)]
+    elif selected_filter == "40個以上":
+        filtered = filtered[latest_stock >= 40]
+
+    st.markdown("---")
+    st.markdown(
+        f"📌 **「{selected_filter}」** に該当する商品:  \n"
+        f"**<span style='font-size:1.5rem; color:#e74c3c;'>{len(filtered)}</span>** 件 / 全 {len(merged)} 件",
+        unsafe_allow_html=True
     )
+
+    st.markdown("---")
+    st.markdown("**📊 サマリー（フィルタ後）**")
+    st.metric("増加した商品", f"{(filtered['増減数'] > 0).sum():,}")
+    st.metric("減少した商品", f"{(filtered['増減数'] < 0).sum():,}")
+    st.metric("変化なし", f"{(filtered['増減数'] == 0).sum():,}")
+
+    st.markdown("---")
+    # PDF ダウンロード
+    if not filtered.empty:
+        pdf_data = _create_pdf(filtered)
+        st.download_button(
+            label="� 結果を PDF でダウンロード",
+            data=pdf_data,
+            file_name="inventory_diff.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+with right_col:
+    # ──────────────────────────────────────────────
+    # テーブル表示
+    # ──────────────────────────────────────────────
+    st.subheader("📊 比較結果")
+
+    if filtered.empty:
+        st.warning("条件に該当するデータがありません。")
+    else:
+        styled = filtered.style.map(_style_diff, subset=["増減数"])
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            height=600,
+        )
 
 # ──────────────────────────────────────────────
 # 履歴へ保存
@@ -406,12 +606,12 @@ if st.session_state.history:
         label = f"📋 {h['timestamp']}　—　{', '.join(h['file_names'])}　（{h['product_count']} 商品）"
         with st.expander(label, expanded=(hi == 0 and not already_saved)):
             st.dataframe(h["dataframe"], use_container_width=True)
-            csv_h = h["dataframe"].to_csv(index=False).encode("utf-8-sig")
+            pdf_h = _create_pdf(h["dataframe"])
             st.download_button(
-                label="📥 この履歴を CSV でダウンロード",
-                data=csv_h,
-                file_name=f"history_{h['timestamp'].replace(':', '-')}.csv",
-                mime="text/csv",
+                label="� この履歴を PDF でダウンロード",
+                data=pdf_h,
+                file_name=f"history_{h['timestamp'].replace(':', '-')}.pdf",
+                mime="application/pdf",
                 key=f"dl_hist_{hi}",
                 use_container_width=True,
             )
