@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#1e3a5f"        # ダークネイビー (押下時のアクセントカラー)
+backgroundColor = "#f0f2f5"     # 落ち着いたライトグレー (画面全体の背景)
+secondaryBackgroundColor = "#ffffff" # 純白 (サイドバー、各種パネルの背景)
+textColor = "#333333"           # プロフェッショナルなダークグレー文字色
+font = "sans serif"             # クリーンで読みやすいフォント
