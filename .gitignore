@@ -1,0 +1,2 @@
+# Streamlit secrets (パスワード等の機密情報)
+.streamlit/secrets.toml
