@@ -75,69 +75,6 @@ if not st.session_state.authenticated:
     st.stop()  # ログインするまでここで停止
 
 # ──────────────────────────────────────────────
-# カスタム CSS
-# ──────────────────────────────────────────────
-st.markdown(
-    """
-    <style>
-    /* デフォルトUIの非表示化 */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    /* 画面上部などの余白を狭くする */
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 1.5rem;
-    }
-
-    /* ヘッダー */
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem 2rem;
-        border-radius: 12px;
-        margin-bottom: 1.5rem;
-        color: white;
-        text-align: center;
-    }
-    .main-header h1 { margin: 0; font-size: 2rem; }
-    .main-header p  { margin: 0.3rem 0 0 0; opacity: 0.85; font-size: 1rem; }
-
-    /* 増減セル色 */
-    .positive { color: #2ecc71; font-weight: 700; }
-    .negative { color: #e74c3c; font-weight: 700; }
-    .zero     { color: #95a5a6; }
-
-    /* データフレーム幅 */
-    .stDataFrame { width: 100% !important; }
-
-    /* 履歴カード */
-    .history-card {
-        background: linear-gradient(135deg, #f5f7fa, #c3cfe2);
-        border-radius: 10px;
-        padding: 0.8rem 1.2rem;
-        margin-bottom: 0.6rem;
-        border-left: 4px solid #667eea;
-    }
-    .history-card h4 { margin: 0 0 0.3rem 0; color: #2d3748; font-size: 0.95rem; }
-    .history-card p  { margin: 0; color: #4a5568; font-size: 0.82rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ──────────────────────────────────────────────
-# ヘッダー
-# ──────────────────────────────────────────────
-st.markdown(
-    '<div class="main-header">'
-    "<h1>📦 在庫増減チェッカー</h1>"
-    "<p>複数の Excel ファイルをアップロードして、商品ごとの在庫増減を一覧比較できます</p>"
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-# ──────────────────────────────────────────────
 # 列名の自動検出ヘルパー
 # ──────────────────────────────────────────────
 _JAN_CANDIDATES = ["JANコード", "JAN", "janコード", "jan_code", "barcode", "バーコード", "商品コード"]
@@ -249,8 +186,40 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
     if os.path.exists(font_path):
         pdfmetrics.registerFont(TTFont(font_name, font_path))
     else:
-        # フォントファイルがない場合のフォールバック（文字化けする可能性あり）
         font_name = "Helvetica"
+
+    # PDF用データフレームのコピーを作成し、列名をシンプルに変更する
+    pdf_df = df.copy()
+    pdf_cols = list(pdf_df.columns)
+    
+    has_rate = "減少率(%)" in pdf_cols
+    # [商品名, 古いファイル, ..., 新しいファイル, 増減数, 減少率(%)] の構成を想定
+    if len(pdf_cols) >= 3:
+        # 列名変更
+        pdf_cols[0] = "商品名"
+        if has_rate:
+            pdf_cols[-1] = "減少率(%)"
+            pdf_cols[-2] = "増減数"
+            # 数値列が2つ以上ある場合（通常）
+            if len(pdf_cols) >= 5:
+                pdf_cols[1] = "旧在庫"
+                pdf_cols[-3] = "新在庫"
+                # 3つ以上のファイルがアップロードされた場合は間に追加
+                for i in range(2, len(pdf_cols) - 3):
+                    pdf_cols[i] = f"中間在庫{i-1}"
+            else:
+                pdf_cols[1] = "在庫"
+        else:
+            pdf_cols[-1] = "増減数"
+            if len(pdf_cols) >= 4:
+                pdf_cols[1] = "旧在庫"
+                pdf_cols[-2] = "新在庫"
+                for i in range(2, len(pdf_cols) - 2):
+                    pdf_cols[i] = f"中間在庫{i-1}"
+            else:
+                pdf_cols[1] = "在庫"
+
+    pdf_df.columns = pdf_cols
 
     buffer = io.BytesIO()
     
@@ -265,15 +234,14 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
     )
 
     # データを2次元リストに変換 (列名 + データ行)
-    data = [df.columns.tolist()] + df.values.tolist()
+    data = [pdf_df.columns.tolist()] + pdf_df.values.tolist()
 
-    # 表の列幅を計算 (A4横幅842 - 左右余白60 = 782 を配分)
-    # 商品名(1列目)を広く、残りを均等にする
     usable_width = 782
-    num_cols = len(df.columns)
+    num_cols = len(pdf_df.columns)
     
     if num_cols > 1:
-        first_col_w = 200
+        # 商品名の列幅を長めに取り、残りの列幅を均等に割る
+        first_col_w = 300 
         other_col_w = (usable_width - first_col_w) / (num_cols - 1)
         col_widths = [first_col_w] + [other_col_w] * (num_cols - 1)
     else:
@@ -283,22 +251,38 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
 
     # テーブルのスタイル設定
     style = TableStyle([
-        ('FONTNAME', (0, 0), (-1, -1), font_name),      # 全体に日本語フォントを適用
-        ('FONTSIZE', (0, 0), (-1, -1), 10),             # フォントサイズ
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#667eea")), # ヘッダーの背景色
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke), # ヘッダーの文字色
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),          # 基本は中央揃え
-        ('ALIGN', (0, 1), (0, -1), 'LEFT'),             # 商品名のみ左揃え
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),         # 垂直中央
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),          # ヘッダーの下部余白
-        ('TOPPADDING', (0, 0), (-1, 0), 8),             # ヘッダーの上部余白
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),    # 全体に1ptの黒い罫線
+        ('FONTNAME', (0, 0), (-1, -1), font_name),            # 全体に日本語フォントを適用
+        ('FONTSIZE', (0, 0), (-1, -1), 10),                   # フォントサイズ
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),    # ヘッダー背景色 (グレー)
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),         # ヘッダー文字色 (黒)
+        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),                 # ヘッダーはすべて中央揃え
+        ('ALIGN', (0, 1), (0, -1), 'LEFT'),                   # 商品名のみ左揃え
+        ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),                 # 以降の数値列は右揃え
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),               # 垂直中央
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),                # ヘッダーの下部余白
+        ('TOPPADDING', (0, 0), (-1, 0), 8),                   # ヘッダーの上部余白
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),          # 全体に1ptの黒罫線
     ])
     
-    # データ行に対し、1行おきに背景色をつけて見やすくする
+    # データ行に対し、背景色の縞模様と文字色(条件付き書式)を適用
     for i in range(1, len(data)):
         if i % 2 == 0:
             style.add('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f8fafc"))
+        
+        # 増減数の値を取得して色分け
+        diff_idx = -2 if has_rate else -1
+        try:
+            diff_num = int(data[i][diff_idx])
+        except (ValueError, TypeError):
+            diff_num = 0
+            
+        if diff_num < 0:
+            # マイナスは赤色
+            style.add('TEXTCOLOR', (diff_idx, i), (diff_idx, i), colors.red)
+        elif diff_num > 0:
+            # プラスは緑色
+            style.add('TEXTCOLOR', (diff_idx, i), (diff_idx, i), colors.green)
+        # 0の場合はデフォルト(黒)のまま
 
     table.setStyle(style)
     
@@ -470,14 +454,31 @@ for file_no, fname, frame in valid_frames:
         how="outer",
     )
 
+# NaN を 0 にする前に、新商品（過去データが null/未定義）かどうかのフラグを作成
+oldest_col = col_labels[0]
+newest_col = col_labels[-1]
+merged["_is_new"] = merged[oldest_col].isna()
+
 # NaN を 0 に
 for c in col_labels:
     merged[c] = merged[c].fillna(0).astype(int)
 
 # 増減列
-oldest_col = col_labels[0]
-newest_col = col_labels[-1]
 merged["増減数"] = merged[newest_col] - merged[oldest_col]
+
+def _calc_decrease_rate(row):
+    prev = row[oldest_col]
+    curr = row[newest_col]
+    if prev <= 10:
+        return "-"
+    try:
+        rate = ((prev - curr) / prev) * 100
+        return f"{rate:.1f}%"
+    except ZeroDivisionError:
+        return "-"
+
+merged["減少率(%)"] = merged.apply(_calc_decrease_rate, axis=1)
+
 
 # ソート
 merged = merged.sort_values("商品名").reset_index(drop=True)
@@ -491,90 +492,118 @@ def _style_diff(val):
     return "color: #95a5a6"
 
 # ──────────────────────────────────────────────
+# ダッシュボード（重要指標）
+# ──────────────────────────────────────────────
+st.markdown("### 📈 在庫サマリー")
+with st.container(border=True):
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("総商品数", f"{len(merged):,}")
+    m2.metric("増加した商品", f"{(merged['増減数'] > 0).sum():,}", f"+{(merged['増減数'] > 0).sum():,}")
+    m3.metric("減少した商品", f"{(merged['増減数'] < 0).sum():,}", f"-{(merged['増減数'] < 0).sum():,}")
+    
+    # マスター未登録の商品数をカウント
+    unknown_count = merged['商品名'].astype(str).str.contains('不明：マスター未登録').sum()
+    m4.metric("マスター未登録", f"{unknown_count:,}", "要確認" if unknown_count > 0 else "OK", delta_color="inverse" if unknown_count > 0 else "normal")
+
+
+st.divider()
+
+# ──────────────────────────────────────────────
 # メインレイアウト分割
 # ──────────────────────────────────────────────
 left_col, right_col = st.columns([1, 2], gap="large")
 
 with left_col:
-    # ──────────────────────────────────────────────
-    # フィルタリング — 最新の在庫数フィルタ
-    # ──────────────────────────────────────────────
-    st.subheader("🔍 最新の在庫数フィルタ")
+    with st.container(border=True):
+        st.subheader("🔍 商品名検索")
+        search_query = st.text_input("検索キーワード", placeholder="商品名の一部を入力...")
 
-    filter_options = [
-        "フィルタなし",
-        "在庫なし（0個）",
-        "わずか（1〜9個）",
-        "10個台（10〜19個）",
-        "20個台（20〜29個）",
-        "30個台（30〜39個）",
-        "40個以上",
-    ]
+        st.markdown("---")
+        st.subheader("🔍 最新の在庫数フィルタ")
 
-    selected_filter = st.selectbox(
-        "表示条件",
-        options=filter_options,
-        index=0, # デフォルトは「フィルタなし」
-        help="選択した条件に最新の在庫数が一致する商品だけが表示されます",
-    )
+        filter_options = [
+            "フィルタなし",
+            "再入荷（過去0個→今回1個以上）",
+            "新商品（今回初登場）",
+            "在庫なし（0個）",
+            "わずか（1〜9個）",
+            "10個台（10〜19個）",
+            "20個台（20〜29個）",
+            "30個台（30〜39個）",
+            "40個以上",
+        ]
 
-    # フィルタ適用
-    filtered = merged.copy()
-    latest_stock = filtered[newest_col]
-
-    if selected_filter == "在庫なし（0個）":
-        filtered = filtered[latest_stock == 0]
-    elif selected_filter == "わずか（1〜9個）":
-        filtered = filtered[(latest_stock >= 1) & (latest_stock <= 9)]
-    elif selected_filter == "10個台（10〜19個）":
-        filtered = filtered[(latest_stock >= 10) & (latest_stock <= 19)]
-    elif selected_filter == "20個台（20〜29個）":
-        filtered = filtered[(latest_stock >= 20) & (latest_stock <= 29)]
-    elif selected_filter == "30個台（30〜39個）":
-        filtered = filtered[(latest_stock >= 30) & (latest_stock <= 39)]
-    elif selected_filter == "40個以上":
-        filtered = filtered[latest_stock >= 40]
-
-    st.markdown("---")
-    st.markdown(
-        f"📌 **「{selected_filter}」** に該当する商品:  \n"
-        f"**<span style='font-size:1.5rem; color:#e74c3c;'>{len(filtered)}</span>** 件 / 全 {len(merged)} 件",
-        unsafe_allow_html=True
-    )
-
-    st.markdown("---")
-    st.markdown("**📊 サマリー（フィルタ後）**")
-    st.metric("増加した商品", f"{(filtered['増減数'] > 0).sum():,}")
-    st.metric("減少した商品", f"{(filtered['増減数'] < 0).sum():,}")
-    st.metric("変化なし", f"{(filtered['増減数'] == 0).sum():,}")
-
-    st.markdown("---")
-    # PDF ダウンロード
-    if not filtered.empty:
-        pdf_data = _create_pdf(filtered)
-        st.download_button(
-            label="� 結果を PDF でダウンロード",
-            data=pdf_data,
-            file_name="inventory_diff.pdf",
-            mime="application/pdf",
-            use_container_width=True,
+        selected_filter = st.selectbox(
+            "表示条件",
+            options=filter_options,
+            index=0, # デフォルトは「フィルタなし」
+            help="選択した条件に最新の在庫数が一致する商品だけが表示されます",
         )
+
+        # フィルタ適用
+        filtered = merged.copy()
+        
+        # 1. 検索キーワードで絞り込み
+        if search_query:
+            filtered = filtered[filtered["商品名"].str.contains(search_query, case=False, na=False)]
+
+        latest_stock = filtered[newest_col]
+
+        # 2. 在庫数フィルタで絞り込み
+
+        if selected_filter == "再入荷（過去0個→今回1個以上）":
+            # 過去データが厳密に 0 かつ、今回が 1 以上、かつ「新商品」ではないものを抽出
+            filtered = filtered[(filtered[oldest_col] == 0) & (latest_stock >= 1) & (~filtered["_is_new"])]
+        elif selected_filter == "新商品（今回初登場）":
+            filtered = filtered[filtered["_is_new"] & (latest_stock >= 1)]
+        elif selected_filter == "在庫なし（0個）":
+            filtered = filtered[latest_stock == 0]
+        elif selected_filter == "わずか（1〜9個）":
+            filtered = filtered[(latest_stock >= 1) & (latest_stock <= 9)]
+        elif selected_filter == "10個台（10〜19個）":
+            filtered = filtered[(latest_stock >= 10) & (latest_stock <= 19)]
+        elif selected_filter == "20個台（20〜29個）":
+            filtered = filtered[(latest_stock >= 20) & (latest_stock <= 29)]
+        elif selected_filter == "30個台（30〜39個）":
+            filtered = filtered[(latest_stock >= 30) & (latest_stock <= 39)]
+        elif selected_filter == "40個以上":
+            filtered = filtered[latest_stock >= 40]
+
+        st.markdown("---")
+        st.markdown(
+            f"📌 **「{selected_filter}」** に該当する商品:  \n"
+            f"**<span style='font-size:1.5rem; color:#e74c3c;'>{len(filtered)}</span>** 件 / 全 {len(merged)} 件",
+            unsafe_allow_html=True
+        )
+
+        st.markdown("---")
+        # PDF ダウンロード用に表示用データフレームからフラグを削除
+        export_df = filtered.drop(columns=["_is_new"]) if not filtered.empty else filtered
+
+        if not export_df.empty:
+            pdf_data = _create_pdf(export_df)
+            st.download_button(
+                label="📄 フィルタ結果を PDF でダウンロード",
+                data=pdf_data,
+                file_name="inventory_diff.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
 with right_col:
-    # ──────────────────────────────────────────────
-    # テーブル表示
-    # ──────────────────────────────────────────────
-    st.subheader("📊 比較結果")
+    with st.container(border=True):
+        st.subheader("📊 比較結果テーブル")
 
-    if filtered.empty:
-        st.warning("条件に該当するデータがありません。")
-    else:
-        styled = filtered.style.map(_style_diff, subset=["増減数"])
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            height=600,
-        )
+        if filtered.empty:
+            st.warning("条件に該当するデータがありません。")
+        else:
+            display_df = filtered.drop(columns=["_is_new"])
+            styled = display_df.style.map(_style_diff, subset=["増減数"])
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                height=600,
+            )
 
 # ──────────────────────────────────────────────
 # 履歴へ保存
@@ -590,7 +619,7 @@ if not already_saved:
             "file_count": len(valid_frames),
             "file_names": [f[1] for f in valid_frames],
             "product_count": len(merged),
-            "dataframe": merged.copy(),
+            "dataframe": merged.drop(columns=["_is_new"]).copy(),
         }
     )
 
