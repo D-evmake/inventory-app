@@ -80,6 +80,7 @@ if not st.session_state.authenticated:
 _JAN_CANDIDATES = ["JANコード", "JAN", "janコード", "jan_code", "barcode", "バーコード", "商品コード"]
 _PRODUCT_CANDIDATES = ["商品名", "品名", "製品名", "品番", "商品", "アイテム名", "item", "product"]
 _QTY_CANDIDATES = ["個数", "数量", "在庫数", "在庫", "stock", "quantity", "qty"]
+_SHELF_CANDIDATES = ["棚番", "棚", "shelf", "ロケーション", "location", "配置", "売り場"]
 
 
 def _find_column(columns: pd.Index, candidates: list[str]) -> str | None:
@@ -132,8 +133,14 @@ def _extract_and_merge(
             f"  実際の列名: {', '.join(df_main.columns.tolist())}"
         )
 
-    main_data = df_main[[jan_col_main, qty_col]].copy()
-    main_data.columns = ["JANコード", "個数"]
+    shelf_col_main = _find_column(df_main.columns, _SHELF_CANDIDATES)
+    if shelf_col_main:
+        main_data = df_main[[jan_col_main, qty_col, shelf_col_main]].copy()
+        main_data.columns = ["JANコード", "個数", "棚番"]
+    else:
+        main_data = df_main[[jan_col_main, qty_col]].copy()
+        main_data.columns = ["JANコード", "個数"]
+
     main_data["個数"] = pd.to_numeric(main_data["個数"], errors="coerce").fillna(0).astype(int)
     main_data = main_data.dropna(subset=["JANコード"])
 
@@ -159,8 +166,14 @@ def _extract_and_merge(
             f"  実際の列名: {', '.join(df_master.columns.tolist())}"
         )
 
-    master_data = df_master[[jan_col_master, product_col]].copy()
-    master_data.columns = ["JANコード", "商品名"]
+    shelf_col_master = _find_column(df_master.columns, _SHELF_CANDIDATES)
+    if shelf_col_master:
+        master_data = df_master[[jan_col_master, product_col, shelf_col_master]].copy()
+        master_data.columns = ["JANコード", "商品名", "棚番"]
+    else:
+        master_data = df_master[[jan_col_master, product_col]].copy()
+        master_data.columns = ["JANコード", "商品名"]
+        
     master_data = master_data.dropna(subset=["JANコード", "商品名"])
     # マスターの重複を除去（最初の出現を採用）
     master_data = master_data.drop_duplicates(subset=["JANコード"], keep="first")
@@ -169,11 +182,28 @@ def _extract_and_merge(
     # VLOOKUP等の数式は無視し、マスターの実データで結合
     merged = pd.merge(main_data, master_data, on="JANコード", how="left")
 
+    # 棚番の解決（mainとmasterの両方にある場合はmain優先）
+    if "棚番_x" in merged.columns and "棚番_y" in merged.columns:
+        merged["棚番"] = merged["棚番_x"].combine_first(merged["棚番_y"])
+        merged = merged.drop(columns=["棚番_x", "棚番_y"])
+    elif "棚番_x" in merged.columns:
+        merged = merged.rename(columns={"棚番_x": "棚番"})
+    elif "棚番_y" in merged.columns:
+        merged = merged.rename(columns={"棚番_y": "棚番"})
+    else:
+        if "棚番" not in merged.columns:
+            merged["棚番"] = "-"
+    
+    merged["棚番"] = merged["棚番"].fillna("-").astype(str)
+
     # マスターに存在しない JAN コードは商品名を「（不明）」で埋める
     merged["商品名"] = merged["商品名"].fillna("（不明：マスター未登録）")
 
-    # 商品名ごとに個数を合算
-    result = merged.groupby("商品名", as_index=False)["個数"].sum()
+    # 商品名ごとに個数と棚番をまとめる
+    result = merged.groupby("商品名", as_index=False).agg({
+        "個数": "sum",
+        "棚番": "first"
+    })
 
     return result, None
 
@@ -193,33 +223,28 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
     pdf_cols = list(pdf_df.columns)
     
     has_rate = "減少率(%)" in pdf_cols
-    # [商品名, 古いファイル, ..., 新しいファイル, 増減数, 減少率(%)] の構成を想定
-    if len(pdf_cols) >= 3:
-        # 列名変更
-        pdf_cols[0] = "商品名"
-        if has_rate:
-            pdf_cols[-1] = "減少率(%)"
-            pdf_cols[-2] = "増減数"
-            # 数値列が2つ以上ある場合（通常）
-            if len(pdf_cols) >= 5:
-                pdf_cols[1] = "旧在庫"
-                pdf_cols[-3] = "新在庫"
-                # 3つ以上のファイルがアップロードされた場合は間に追加
-                for i in range(2, len(pdf_cols) - 3):
-                    pdf_cols[i] = f"中間在庫{i-1}"
-            else:
-                pdf_cols[1] = "在庫"
+    
+    rename_mapping = {}
+    file_cols_list = [c for c in pdf_cols if c not in ("商品名", "棚番", "増減数", "減少率(%)")]
+    
+    for c in pdf_cols:
+        if c in ("商品名", "棚番", "増減数", "減少率(%)"):
+            rename_mapping[c] = c
         else:
-            pdf_cols[-1] = "増減数"
-            if len(pdf_cols) >= 4:
-                pdf_cols[1] = "旧在庫"
-                pdf_cols[-2] = "新在庫"
-                for i in range(2, len(pdf_cols) - 2):
-                    pdf_cols[i] = f"中間在庫{i-1}"
-            else:
-                pdf_cols[1] = "在庫"
-
-    pdf_df.columns = pdf_cols
+            try:
+                idx = file_cols_list.index(c)
+                if len(file_cols_list) == 1:
+                    rename_mapping[c] = "在庫"
+                elif idx == 0:
+                    rename_mapping[c] = "旧在庫"
+                elif idx == len(file_cols_list) - 1:
+                    rename_mapping[c] = "新在庫"
+                else:
+                    rename_mapping[c] = f"中間在庫{idx}"
+            except ValueError:
+                rename_mapping[c] = c
+                
+    pdf_df.rename(columns=rename_mapping, inplace=True)
 
     buffer = io.BytesIO()
     
@@ -240,10 +265,26 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
     num_cols = len(pdf_df.columns)
     
     if num_cols > 1:
-        # 商品名の列幅を長めに取り、残りの列幅を均等に割る
-        first_col_w = 300 
-        other_col_w = (usable_width - first_col_w) / (num_cols - 1)
-        col_widths = [first_col_w] + [other_col_w] * (num_cols - 1)
+        col_widths = []
+        first_col_w = 260
+        remaining_width = usable_width - first_col_w
+        remaining_cols = num_cols - 1
+        
+        has_shelf = "棚番" in pdf_df.columns
+        shelf_col_w = 60
+        if has_shelf:
+            remaining_width -= shelf_col_w
+            remaining_cols -= 1
+            
+        other_col_w = remaining_width / max(1, remaining_cols)
+        
+        for c in pdf_df.columns:
+            if c == "商品名":
+                col_widths.append(first_col_w)
+            elif c == "棚番":
+                col_widths.append(shelf_col_w)
+            else:
+                col_widths.append(other_col_w)
     else:
         col_widths = [usable_width]
 
@@ -269,20 +310,19 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
         if i % 2 == 0:
             style.add('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f8fafc"))
         
-        # 増減数の値を取得して色分け
-        diff_idx = -2 if has_rate else -1
+        # 増減数列のインデックスを探して色分け
         try:
+            diff_idx = pdf_df.columns.tolist().index("増減数")
             diff_num = int(data[i][diff_idx])
         except (ValueError, TypeError):
+            diff_idx = None
             diff_num = 0
             
-        if diff_num < 0:
-            # マイナスは赤色
-            style.add('TEXTCOLOR', (diff_idx, i), (diff_idx, i), colors.red)
-        elif diff_num > 0:
-            # プラスは緑色
-            style.add('TEXTCOLOR', (diff_idx, i), (diff_idx, i), colors.green)
-        # 0の場合はデフォルト(黒)のまま
+        if diff_idx is not None:
+            if diff_num < 0:
+                style.add('TEXTCOLOR', (diff_idx, i), (diff_idx, i), colors.red)
+            elif diff_num > 0:
+                style.add('TEXTCOLOR', (diff_idx, i), (diff_idx, i), colors.green)
 
     table.setStyle(style)
     
@@ -441,18 +481,26 @@ if len(valid_frames) < 2:
                 st.dataframe(h["dataframe"], use_container_width=True)
     st.stop()
 
-# 結合
+# 結合と棚番の収集
 merged = valid_frames[0][2][["商品名"]].copy()
+shelf_mapping = {}
 col_labels: list[str] = []
 
 for file_no, fname, frame in valid_frames:
     col_name = f"{file_no}番目({fname})"
     col_labels.append(col_name)
     merged = merged.merge(
-        frame.rename(columns={"個数": col_name}),
+        frame[["商品名", "個数"]].rename(columns={"個数": col_name}),
         on="商品名",
         how="outer",
     )
+    
+    for _, row in frame.iterrows():
+        if "棚番" in row and pd.notna(row["棚番"]) and row["棚番"] != "-" and str(row["棚番"]).lower() != "nan":
+            shelf_mapping[row["商品名"]] = row["棚番"]
+
+# 棚番列を商品名の次に追加
+merged.insert(1, "棚番", merged["商品名"].map(lambda x: shelf_mapping.get(x, "-")))
 
 # NaN を 0 にする前に、新商品（過去データが null/未定義）かどうかのフラグを作成
 oldest_col = col_labels[0]
@@ -479,9 +527,17 @@ def _calc_decrease_rate(row):
 
 merged["減少率(%)"] = merged.apply(_calc_decrease_rate, axis=1)
 
+def _calc_decrease_val(row):
+    prev = row[oldest_col]
+    curr = row[newest_col]
+    if prev <= 0:
+        return 0.0
+    return ((prev - curr) / prev) * 100.0
+
+merged["_decrease_rate_val"] = merged.apply(_calc_decrease_val, axis=1)
 
 # ソート
-merged = merged.sort_values("商品名").reset_index(drop=True)
+merged = merged.sort_values(["棚番", "商品名"]).reset_index(drop=True)
 
 # 色付け関数
 def _style_diff(val):
@@ -519,33 +575,57 @@ with left_col:
         search_query = st.text_input("検索キーワード", placeholder="商品名の一部を入力...")
 
         st.markdown("---")
-        st.subheader("🔍 最新の在庫数フィルタ")
-
-        filter_options = [
-            "フィルタなし",
-            "再入荷（過去0個→今回1個以上）",
-            "新商品（今回初登場）",
-            "在庫なし（0個）",
-            "わずか（1〜9個）",
-            "10個台（10〜19個）",
-            "20個台（20〜29個）",
-            "30個台（30〜39個）",
-            "40個以上",
-        ]
-
-        selected_filter = st.selectbox(
-            "表示条件",
-            options=filter_options,
-            index=0, # デフォルトは「フィルタなし」
-            help="選択した条件に最新の在庫数が一致する商品だけが表示されます",
-        )
+        
+        # フィルタを2カラムで配置
+        f_col1, f_col2 = st.columns(2)
+        
+        with f_col1:
+            st.subheader("🔍 在庫数フィルタ")
+            filter_options = [
+                "フィルタなし",
+                "再入荷（過去0個→今回1個以上）",
+                "新商品（今回初登場）",
+                "在庫なし（0個）",
+                "わずか（1〜9個）",
+                "10個台（10〜19個）",
+                "20個台（20〜29個）",
+                "30個台（30〜39個）",
+                "40個以上",
+            ]
+            selected_filter = st.selectbox(
+                "在庫の条件",
+                options=filter_options,
+                index=0,
+                help="選択した条件に最新の在庫数が一致する商品だけが表示されます",
+            )
+            
+        with f_col2:
+            st.subheader("📉 減少率フィルタ")
+            decrease_options = [
+                "指定なし",
+                "減少率10%以上",
+                "減少率20%以上",
+                "減少率30%以上",
+                "減少率40%以上",
+                "減少率50%以上",
+                "減少率75%以上",
+            ]
+            selected_decrease = st.selectbox(
+                "減少の条件",
+                options=decrease_options,
+                index=0,
+                help="指定した割合以上減少している商品だけを表示します"
+            )
 
         # フィルタ適用
         filtered = merged.copy()
         
-        # 1. 検索キーワードで絞り込み
+        # 1. 検索キーワードで絞り込み (商品名または棚番)
         if search_query:
-            filtered = filtered[filtered["商品名"].str.contains(search_query, case=False, na=False)]
+            filtered = filtered[
+                filtered["商品名"].str.contains(search_query, case=False, na=False) |
+                filtered["棚番"].str.contains(search_query, case=False, na=False)
+            ]
 
         latest_stock = filtered[newest_col]
 
@@ -568,17 +648,31 @@ with left_col:
             filtered = filtered[(latest_stock >= 30) & (latest_stock <= 39)]
         elif selected_filter == "40個以上":
             filtered = filtered[latest_stock >= 40]
+            
+        # 3. 減少率フィルタで絞り込み
+        if selected_decrease == "減少率10%以上":
+            filtered = filtered[filtered["_decrease_rate_val"] >= 10.0]
+        elif selected_decrease == "減少率20%以上":
+            filtered = filtered[filtered["_decrease_rate_val"] >= 20.0]
+        elif selected_decrease == "減少率30%以上":
+            filtered = filtered[filtered["_decrease_rate_val"] >= 30.0]
+        elif selected_decrease == "減少率40%以上":
+            filtered = filtered[filtered["_decrease_rate_val"] >= 40.0]
+        elif selected_decrease == "減少率50%以上":
+            filtered = filtered[filtered["_decrease_rate_val"] >= 50.0]
+        elif selected_decrease == "減少率75%以上":
+            filtered = filtered[filtered["_decrease_rate_val"] >= 75.0]
 
         st.markdown("---")
         st.markdown(
-            f"📌 **「{selected_filter}」** に該当する商品:  \n"
+            f"📌 **「{selected_filter}」** ＆ **「{selected_decrease}」** に該当する商品:  \n"
             f"**<span style='font-size:1.5rem; color:#e74c3c;'>{len(filtered)}</span>** 件 / 全 {len(merged)} 件",
             unsafe_allow_html=True
         )
 
         st.markdown("---")
         # PDF ダウンロード用に表示用データフレームからフラグを削除
-        export_df = filtered.drop(columns=["_is_new"]) if not filtered.empty else filtered
+        export_df = filtered.drop(columns=["_is_new", "_decrease_rate_val"]) if not filtered.empty else filtered
 
         if not export_df.empty:
             pdf_data = _create_pdf(export_df)
@@ -597,7 +691,7 @@ with right_col:
         if filtered.empty:
             st.warning("条件に該当するデータがありません。")
         else:
-            display_df = filtered.drop(columns=["_is_new"])
+            display_df = filtered.drop(columns=["_is_new", "_decrease_rate_val"])
             styled = display_df.style.map(_style_diff, subset=["増減数"])
             st.dataframe(
                 styled,
@@ -619,7 +713,7 @@ if not already_saved:
             "file_count": len(valid_frames),
             "file_names": [f[1] for f in valid_frames],
             "product_count": len(merged),
-            "dataframe": merged.drop(columns=["_is_new"]).copy(),
+            "dataframe": merged.drop(columns=["_is_new", "_decrease_rate_val"]).copy(),
         }
     )
 
