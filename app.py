@@ -310,11 +310,21 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
         if i % 2 == 0:
             style.add('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f8fafc"))
         
+        # 棚番が倉庫の場合の色分け
+        try:
+            shelf_idx = pdf_df.columns.tolist().index("棚番")
+            if str(data[i][shelf_idx]) == "倉庫":
+                style.add('TEXTCOLOR', (shelf_idx, i), (shelf_idx, i), colors.HexColor("#d35400"))
+                # 背景色をつけると縞模様と競合する可能性があるので上書き
+                style.add('BACKGROUND', (shelf_idx, i), (shelf_idx, i), colors.HexColor("#fdebd0"))
+        except (ValueError, IndexError):
+            pass
+
         # 増減数列のインデックスを探して色分け
         try:
             diff_idx = pdf_df.columns.tolist().index("増減数")
             diff_num = int(data[i][diff_idx])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, IndexError):
             diff_idx = None
             diff_num = 0
             
@@ -500,7 +510,14 @@ for file_no, fname, frame in valid_frames:
             shelf_mapping[row["商品名"]] = row["棚番"]
 
 # 棚番列を商品名の次に追加
-merged.insert(1, "棚番", merged["商品名"].map(lambda x: shelf_mapping.get(x, "-")))
+def _get_shelf_label(product_name):
+    val = str(shelf_mapping.get(product_name, "-")).strip()
+    # 数値（数字）が含まれていない場合は「倉庫」として表記する
+    if not any(char.isdigit() for char in val):
+        return "倉庫"
+    return val
+
+merged.insert(1, "棚番", merged["商品名"].map(_get_shelf_label))
 
 # NaN を 0 にする前に、新商品（過去データが null/未定義）かどうかのフラグを作成
 oldest_col = col_labels[0]
@@ -546,6 +563,12 @@ def _style_diff(val):
     elif val < 0:
         return "color: #e74c3c; font-weight: 700"
     return "color: #95a5a6"
+
+def _highlight_warehouse_row(row):
+    # 棚番が「倉庫」の場合、行全体にスタイルを適用する
+    if "棚番" in row.index and str(row["棚番"]).strip() == "倉庫":
+        return ["color: #d35400; background-color: #fdebd0; font-weight: 700"] * len(row)
+    return [""] * len(row)
 
 # ──────────────────────────────────────────────
 # ダッシュボード（重要指標）
@@ -693,6 +716,8 @@ with right_col:
         else:
             display_df = filtered.drop(columns=["_is_new", "_decrease_rate_val"])
             styled = display_df.style.map(_style_diff, subset=["増減数"])
+            if "棚番" in display_df.columns:
+                styled = styled.apply(_highlight_warehouse_row, axis=1)
             st.dataframe(
                 styled,
                 use_container_width=True,
@@ -728,7 +753,11 @@ if st.session_state.history:
     for hi, h in enumerate(reversed(st.session_state.history)):
         label = f"📋 {h['timestamp']}　—　{', '.join(h['file_names'])}　（{h['product_count']} 商品）"
         with st.expander(label, expanded=(hi == 0 and not already_saved)):
-            st.dataframe(h["dataframe"], use_container_width=True)
+            hist_df = h["dataframe"]
+            hist_styled = hist_df.style.map(_style_diff, subset=["増減数"])
+            if "棚番" in hist_df.columns:
+                hist_styled = hist_styled.apply(_highlight_warehouse_row, axis=1)
+            st.dataframe(hist_styled, use_container_width=True)
             pdf_h = _create_pdf(h["dataframe"])
             st.download_button(
                 label="� この履歴を PDF でダウンロード",
