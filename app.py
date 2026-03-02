@@ -626,18 +626,18 @@ with left_col:
             st.subheader("📉 減少率フィルタ")
             decrease_options = [
                 "指定なし",
-                "減少率10%以上",
-                "減少率20%以上",
-                "減少率30%以上",
-                "減少率40%以上",
-                "減少率50%以上",
-                "減少率75%以上",
+                "減少率10%以下",
+                "減少率20%以下",
+                "減少率30%以下",
+                "減少率40%以下",
+                "減少率50%以下",
+                "減少率75%以下",
             ]
             selected_decrease = st.selectbox(
                 "減少の条件",
                 options=decrease_options,
                 index=0,
-                help="指定した割合以上減少している商品だけを表示します"
+                help="指定した割合以下で減少している商品だけを表示します"
             )
 
         # フィルタ適用
@@ -673,18 +673,18 @@ with left_col:
             filtered = filtered[latest_stock >= 40]
             
         # 3. 減少率フィルタで絞り込み
-        if selected_decrease == "減少率10%以上":
-            filtered = filtered[filtered["_decrease_rate_val"] >= 10.0]
-        elif selected_decrease == "減少率20%以上":
-            filtered = filtered[filtered["_decrease_rate_val"] >= 20.0]
-        elif selected_decrease == "減少率30%以上":
-            filtered = filtered[filtered["_decrease_rate_val"] >= 30.0]
-        elif selected_decrease == "減少率40%以上":
-            filtered = filtered[filtered["_decrease_rate_val"] >= 40.0]
-        elif selected_decrease == "減少率50%以上":
-            filtered = filtered[filtered["_decrease_rate_val"] >= 50.0]
-        elif selected_decrease == "減少率75%以上":
-            filtered = filtered[filtered["_decrease_rate_val"] >= 75.0]
+        if selected_decrease == "減少率10%以下":
+            filtered = filtered[filtered["_decrease_rate_val"] <= 10.0]
+        elif selected_decrease == "減少率20%以下":
+            filtered = filtered[filtered["_decrease_rate_val"] <= 20.0]
+        elif selected_decrease == "減少率30%以下":
+            filtered = filtered[filtered["_decrease_rate_val"] <= 30.0]
+        elif selected_decrease == "減少率40%以下":
+            filtered = filtered[filtered["_decrease_rate_val"] <= 40.0]
+        elif selected_decrease == "減少率50%以下":
+            filtered = filtered[filtered["_decrease_rate_val"] <= 50.0]
+        elif selected_decrease == "減少率75%以下":
+            filtered = filtered[filtered["_decrease_rate_val"] <= 75.0]
 
         st.markdown("---")
         st.markdown(
