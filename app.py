@@ -220,6 +220,11 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
 
     # PDF用データフレームのコピーを作成し、列名をシンプルに変更する
     pdf_df = df.copy()
+    
+    # 商品名が長すぎる場合に切り詰める（棚番への侵食回避）
+    if "商品名" in pdf_df.columns:
+        pdf_df["商品名"] = pdf_df["商品名"].astype(str).apply(lambda x: x[:22] + "..." if len(x) > 22 else x)
+        
     pdf_cols = list(pdf_df.columns)
     
     has_rate = "減少率(%)" in pdf_cols
@@ -512,6 +517,8 @@ for file_no, fname, frame in valid_frames:
 # 棚番列を商品名の次に追加
 def _get_shelf_label(product_name):
     val = str(shelf_mapping.get(product_name, "-")).strip()
+    if val.endswith(".0"):
+        val = val[:-2]
     # 数値（数字）が含まれていない場合は「倉庫」として表記する
     if not any(char.isdigit() for char in val):
         return "倉庫"
@@ -548,7 +555,7 @@ def _calc_decrease_val(row):
     prev = row[oldest_col]
     curr = row[newest_col]
     if prev <= 0:
-        return 0.0
+        return float('nan')
     return ((prev - curr) / prev) * 100.0
 
 merged["_decrease_rate_val"] = merged.apply(_calc_decrease_val, axis=1)
