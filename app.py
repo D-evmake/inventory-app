@@ -567,8 +567,9 @@ def _calc_change_val(row):
 
 merged["_change_rate_val"] = merged.apply(_calc_change_val, axis=1)
 
-# ソート
-merged = merged.sort_values(["棚番", "商品名"]).reset_index(drop=True)
+# ソート (UIテーブル全体の棚番を数値として昇順ソートする)
+merged["_shelf_num"] = pd.to_numeric(merged["棚番"], errors="coerce")
+merged = merged.sort_values(["_shelf_num", "商品名"], na_position="last").drop(columns=["_shelf_num"]).reset_index(drop=True)
 
 # 色付け関数
 def _style_diff(val):
@@ -640,18 +641,25 @@ with left_col:
             st.subheader("📉 変動率フィルタ")
             change_options = [
                 "指定なし",
-                "変動率10%以下",
-                "変動率20%以下",
-                "変動率30%以下",
-                "変動率40%以下",
-                "変動率50%以下",
-                "変動率75%以下",
+                "【減少】10%以内 (-10% 〜 0%)",
+                "【減少】20%以内 (-20% 〜 0%)",
+                "【減少】30%以内 (-30% 〜 0%)",
+                "【減少】40%以内 (-40% 〜 0%)",
+                "【減少】50%以内 (-50% 〜 0%)",
+                "【減少】75%以内 (-75% 〜 0%)",
+                "【増加】10%以内 (0% 〜 +10%)",
+                "【増加】20%以内 (0% 〜 +20%)",
+                "【増加】30%以内 (0% 〜 +30%)",
+                "【増加】40%以内 (0% 〜 +40%)",
+                "【増加】50%以内 (0% 〜 +50%)",
+                "【増加】75%以内 (0% 〜 +75%)",
+                "【増加】100%以上 (+100% 〜)",
             ]
             selected_change = st.selectbox(
                 "変動の条件",
                 options=change_options,
                 index=0,
-                help="指定した割合以内で減少している商品だけを表示します（例：40%以下なら -40%以上 〜 0%以下）"
+                help="指定した割合の範囲で変動（減少または増加）している商品だけを表示します"
             )
 
         # フィルタ適用
@@ -687,18 +695,32 @@ with left_col:
             filtered = filtered[latest_stock >= 40]
             
         # 3. 変動率フィルタで絞り込み
-        if selected_change == "変動率10%以下":
+        if selected_change == "【減少】10%以内 (-10% 〜 0%)":
             filtered = filtered[(filtered["_change_rate_val"] >= -10.0) & (filtered["_change_rate_val"] <= 0.0)]
-        elif selected_change == "変動率20%以下":
+        elif selected_change == "【減少】20%以内 (-20% 〜 0%)":
             filtered = filtered[(filtered["_change_rate_val"] >= -20.0) & (filtered["_change_rate_val"] <= 0.0)]
-        elif selected_change == "変動率30%以下":
+        elif selected_change == "【減少】30%以内 (-30% 〜 0%)":
             filtered = filtered[(filtered["_change_rate_val"] >= -30.0) & (filtered["_change_rate_val"] <= 0.0)]
-        elif selected_change == "変動率40%以下":
+        elif selected_change == "【減少】40%以内 (-40% 〜 0%)":
             filtered = filtered[(filtered["_change_rate_val"] >= -40.0) & (filtered["_change_rate_val"] <= 0.0)]
-        elif selected_change == "変動率50%以下":
+        elif selected_change == "【減少】50%以内 (-50% 〜 0%)":
             filtered = filtered[(filtered["_change_rate_val"] >= -50.0) & (filtered["_change_rate_val"] <= 0.0)]
-        elif selected_change == "変動率75%以下":
+        elif selected_change == "【減少】75%以内 (-75% 〜 0%)":
             filtered = filtered[(filtered["_change_rate_val"] >= -75.0) & (filtered["_change_rate_val"] <= 0.0)]
+        elif selected_change == "【増加】10%以内 (0% 〜 +10%)":
+            filtered = filtered[(filtered["_change_rate_val"] >= 0.0) & (filtered["_change_rate_val"] <= 10.0)]
+        elif selected_change == "【増加】20%以内 (0% 〜 +20%)":
+            filtered = filtered[(filtered["_change_rate_val"] >= 0.0) & (filtered["_change_rate_val"] <= 20.0)]
+        elif selected_change == "【増加】30%以内 (0% 〜 +30%)":
+            filtered = filtered[(filtered["_change_rate_val"] >= 0.0) & (filtered["_change_rate_val"] <= 30.0)]
+        elif selected_change == "【増加】40%以内 (0% 〜 +40%)":
+            filtered = filtered[(filtered["_change_rate_val"] >= 0.0) & (filtered["_change_rate_val"] <= 40.0)]
+        elif selected_change == "【増加】50%以内 (0% 〜 +50%)":
+            filtered = filtered[(filtered["_change_rate_val"] >= 0.0) & (filtered["_change_rate_val"] <= 50.0)]
+        elif selected_change == "【増加】75%以内 (0% 〜 +75%)":
+            filtered = filtered[(filtered["_change_rate_val"] >= 0.0) & (filtered["_change_rate_val"] <= 75.0)]
+        elif selected_change == "【増加】100%以上 (+100% 〜)":
+            filtered = filtered[filtered["_change_rate_val"] >= 100.0]
 
         st.markdown("---")
         st.markdown(
