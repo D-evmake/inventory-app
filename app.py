@@ -221,19 +221,24 @@ def _create_pdf(df: pd.DataFrame) -> bytes:
     # PDF用データフレームのコピーを作成し、列名をシンプルに変更する
     pdf_df = df.copy()
     
+    # 棚番を数値として昇順ソートする
+    if "棚番" in pdf_df.columns:
+        pdf_df["_shelf_num"] = pd.to_numeric(pdf_df["棚番"], errors="coerce")
+        pdf_df = pdf_df.sort_values(["_shelf_num", "商品名"], na_position="last").drop(columns=["_shelf_num"])
+
     # 商品名が長すぎる場合に切り詰める（棚番への侵食回避）
     if "商品名" in pdf_df.columns:
         pdf_df["商品名"] = pdf_df["商品名"].astype(str).apply(lambda x: x[:22] + "..." if len(x) > 22 else x)
         
     pdf_cols = list(pdf_df.columns)
     
-    has_rate = "減少率(%)" in pdf_cols
+    has_rate = "変動率(%)" in pdf_cols
     
     rename_mapping = {}
-    file_cols_list = [c for c in pdf_cols if c not in ("商品名", "棚番", "増減数", "減少率(%)")]
+    file_cols_list = [c for c in pdf_cols if c not in ("商品名", "棚番", "増減数", "変動率(%)")]
     
     for c in pdf_cols:
-        if c in ("商品名", "棚番", "増減数", "減少率(%)"):
+        if c in ("商品名", "棚番", "増減数", "変動率(%)"):
             rename_mapping[c] = c
         else:
             try:
@@ -538,27 +543,29 @@ for c in col_labels:
 # 増減列
 merged["増減数"] = merged[newest_col] - merged[oldest_col]
 
-def _calc_decrease_rate(row):
+def _calc_change_rate(row):
     prev = row[oldest_col]
     curr = row[newest_col]
     if prev <= 10:
         return "-"
     try:
-        rate = ((prev - curr) / prev) * 100
+        rate = ((curr - prev) / prev) * 100
+        if rate > 0:
+            return f"+{rate:.1f}%"
         return f"{rate:.1f}%"
     except ZeroDivisionError:
         return "-"
 
-merged["減少率(%)"] = merged.apply(_calc_decrease_rate, axis=1)
+merged["変動率(%)"] = merged.apply(_calc_change_rate, axis=1)
 
-def _calc_decrease_val(row):
+def _calc_change_val(row):
     prev = row[oldest_col]
     curr = row[newest_col]
     if prev <= 0:
         return float('nan')
-    return ((prev - curr) / prev) * 100.0
+    return ((curr - prev) / prev) * 100.0
 
-merged["_decrease_rate_val"] = merged.apply(_calc_decrease_val, axis=1)
+merged["_change_rate_val"] = merged.apply(_calc_change_val, axis=1)
 
 # ソート
 merged = merged.sort_values(["棚番", "商品名"]).reset_index(drop=True)
@@ -630,21 +637,21 @@ with left_col:
             )
             
         with f_col2:
-            st.subheader("📉 減少率フィルタ")
-            decrease_options = [
+            st.subheader("📉 変動率フィルタ")
+            change_options = [
                 "指定なし",
-                "減少率10%以下",
-                "減少率20%以下",
-                "減少率30%以下",
-                "減少率40%以下",
-                "減少率50%以下",
-                "減少率75%以下",
+                "変動率10%以下",
+                "変動率20%以下",
+                "変動率30%以下",
+                "変動率40%以下",
+                "変動率50%以下",
+                "変動率75%以下",
             ]
-            selected_decrease = st.selectbox(
-                "減少の条件",
-                options=decrease_options,
+            selected_change = st.selectbox(
+                "変動の条件",
+                options=change_options,
                 index=0,
-                help="指定した割合以下で減少している商品だけを表示します"
+                help="指定した割合以内で減少している商品だけを表示します（例：40%以下なら -40%以上 〜 0%以下）"
             )
 
         # フィルタ適用
@@ -679,30 +686,30 @@ with left_col:
         elif selected_filter == "40個以上":
             filtered = filtered[latest_stock >= 40]
             
-        # 3. 減少率フィルタで絞り込み
-        if selected_decrease == "減少率10%以下":
-            filtered = filtered[filtered["_decrease_rate_val"] <= 10.0]
-        elif selected_decrease == "減少率20%以下":
-            filtered = filtered[filtered["_decrease_rate_val"] <= 20.0]
-        elif selected_decrease == "減少率30%以下":
-            filtered = filtered[filtered["_decrease_rate_val"] <= 30.0]
-        elif selected_decrease == "減少率40%以下":
-            filtered = filtered[filtered["_decrease_rate_val"] <= 40.0]
-        elif selected_decrease == "減少率50%以下":
-            filtered = filtered[filtered["_decrease_rate_val"] <= 50.0]
-        elif selected_decrease == "減少率75%以下":
-            filtered = filtered[filtered["_decrease_rate_val"] <= 75.0]
+        # 3. 変動率フィルタで絞り込み
+        if selected_change == "変動率10%以下":
+            filtered = filtered[(filtered["_change_rate_val"] >= -10.0) & (filtered["_change_rate_val"] <= 0.0)]
+        elif selected_change == "変動率20%以下":
+            filtered = filtered[(filtered["_change_rate_val"] >= -20.0) & (filtered["_change_rate_val"] <= 0.0)]
+        elif selected_change == "変動率30%以下":
+            filtered = filtered[(filtered["_change_rate_val"] >= -30.0) & (filtered["_change_rate_val"] <= 0.0)]
+        elif selected_change == "変動率40%以下":
+            filtered = filtered[(filtered["_change_rate_val"] >= -40.0) & (filtered["_change_rate_val"] <= 0.0)]
+        elif selected_change == "変動率50%以下":
+            filtered = filtered[(filtered["_change_rate_val"] >= -50.0) & (filtered["_change_rate_val"] <= 0.0)]
+        elif selected_change == "変動率75%以下":
+            filtered = filtered[(filtered["_change_rate_val"] >= -75.0) & (filtered["_change_rate_val"] <= 0.0)]
 
         st.markdown("---")
         st.markdown(
-            f"📌 **「{selected_filter}」** ＆ **「{selected_decrease}」** に該当する商品:  \n"
+            f"📌 **「{selected_filter}」** ＆ **「{selected_change}」** に該当する商品:  \n"
             f"**<span style='font-size:1.5rem; color:#e74c3c;'>{len(filtered)}</span>** 件 / 全 {len(merged)} 件",
             unsafe_allow_html=True
         )
 
         st.markdown("---")
         # PDF ダウンロード用に表示用データフレームからフラグを削除
-        export_df = filtered.drop(columns=["_is_new", "_decrease_rate_val"]) if not filtered.empty else filtered
+        export_df = filtered.drop(columns=["_is_new", "_change_rate_val"]) if not filtered.empty else filtered
 
         if not export_df.empty:
             pdf_data = _create_pdf(export_df)
@@ -721,7 +728,7 @@ with right_col:
         if filtered.empty:
             st.warning("条件に該当するデータがありません。")
         else:
-            display_df = filtered.drop(columns=["_is_new", "_decrease_rate_val"])
+            display_df = filtered.drop(columns=["_is_new", "_change_rate_val"])
             styled = display_df.style.map(_style_diff, subset=["増減数"])
             if "棚番" in display_df.columns:
                 styled = styled.apply(_highlight_warehouse_row, axis=1)
@@ -745,7 +752,7 @@ if not already_saved:
             "file_count": len(valid_frames),
             "file_names": [f[1] for f in valid_frames],
             "product_count": len(merged),
-            "dataframe": merged.drop(columns=["_is_new", "_decrease_rate_val"]).copy(),
+            "dataframe": merged.drop(columns=["_is_new", "_change_rate_val"]).copy(),
         }
     )
 
